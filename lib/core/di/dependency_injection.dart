@@ -31,6 +31,7 @@ import '../../domain/services/audio_player_service.dart';
 import '../../domain/usecases/music_usecases.dart';
 import '../../domain/usecases/player_usecases.dart';
 import '../localization/locale_controller.dart';
+import '../settings/online_metadata_controller.dart';
 import '../theme/theme_controller.dart';
 import '../../domain/usecases/lyrics_usecases.dart';
 import '../storage/storage_path_provider.dart';
@@ -39,6 +40,7 @@ import '../storage/binary_config_store.dart';
 import '../../data/storage/playlist_file_storage.dart';
 import '../../data/storage/netease_session_store.dart';
 import '../services/desktop_lyrics_bridge.dart';
+import '../services/carplay_service.dart';
 import '../services/file_association_service.dart';
 
 final sl = GetIt.instance;
@@ -141,8 +143,12 @@ class DependencyInjection {
       );
       sl.registerSingleton<AudioHandler>(audioHandler);
 
+      sl.registerLazySingleton(() => CarPlayService(sl(), sl()));
+      await sl<CarPlayService>().initialize();
+
       sl.registerLazySingleton(() => ThemeController(sl()));
       sl.registerLazySingleton(() => LocaleController(sl()));
+      sl.registerLazySingleton(() => OnlineMetadataController(sl()));
 
       // Use cases
       print('⚙️ 注册用例...');
@@ -151,6 +157,7 @@ class DependencyInjection {
       sl.registerLazySingleton(() => ImportLocalTracks(sl()));
       sl.registerLazySingleton(() => ScanMusicDirectory(sl()));
       sl.registerLazySingleton(() => ScanWebDavDirectory(sl()));
+      sl.registerLazySingleton(() => ScanJellyfinLibrary(sl()));
       sl.registerLazySingleton(() => MountMysteryLibrary(sl()));
       sl.registerLazySingleton(() => UnmountMysteryLibrary(sl()));
       sl.registerLazySingleton(() => GetAllArtists(sl()));
@@ -166,6 +173,12 @@ class DependencyInjection {
       sl.registerLazySingleton(() => TestWebDavConnection(sl()));
       sl.registerLazySingleton(() => ListWebDavDirectory(sl()));
       sl.registerLazySingleton(() => EnsureWebDavTrackMetadata(sl()));
+      sl.registerLazySingleton(() => AuthenticateJellyfin(sl()));
+      sl.registerLazySingleton(() => GetJellyfinLibraries(sl()));
+      sl.registerLazySingleton(() => GetJellyfinSources(sl()));
+      sl.registerLazySingleton(() => GetJellyfinSourceById(sl()));
+      sl.registerLazySingleton(() => DeleteJellyfinSource(sl()));
+      sl.registerLazySingleton(() => GetJellyfinAccessToken(sl()));
       sl.registerLazySingleton(() => WatchTrackUpdates(sl()));
 
       sl.registerLazySingleton(() => PlayTrack(sl()));
@@ -188,6 +201,7 @@ class DependencyInjection {
       print('🚀 初始化服务...');
       await sl<ThemeController>().load();
       await sl<LocaleController>().load();
+      await sl<OnlineMetadataController>().load();
 
       print('✅ 依赖注入初始化完成！');
     } catch (e) {
