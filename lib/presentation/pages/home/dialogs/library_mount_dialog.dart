@@ -19,14 +19,19 @@ Future<LibraryMountMode?> showLibraryMountModeDialog(BuildContext context) {
             onTap: () =>
                 Navigator.of(dialogContext).pop(LibraryMountMode.local),
           ),
-          const SizedBox(height: 12),
-          _PlaylistCreationModeOption(
-            icon: CupertinoIcons.cloud_upload,
-            title: dialogL10n.libraryMountOptionICloudTitle,
-            description: dialogL10n.libraryMountOptionICloudDescription,
-            onTap: () =>
-                Navigator.of(dialogContext).pop(LibraryMountMode.icloud),
-          ),
+          // iCloud option temporarily hidden while the feature is unavailable.
+          // Enable by setting `AppConstants.iosICloudEnabled = true` in
+          // `AppConstants` when re-enabling the feature.
+          if (AppConstants.iosICloudEnabled) ...[
+            const SizedBox(height: 12),
+            _PlaylistCreationModeOption(
+              icon: CupertinoIcons.cloud_upload,
+              title: dialogL10n.libraryMountOptionICloudTitle,
+              description: dialogL10n.libraryMountOptionICloudDescription,
+              onTap: () =>
+                  Navigator.of(dialogContext).pop(LibraryMountMode.icloud),
+            ),
+          ],
         ] else ...[
           _PlaylistCreationModeOption(
             icon: CupertinoIcons.folder_solid,

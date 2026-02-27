@@ -34,6 +34,10 @@ class AppConstants {
       'https://nipaplay.aimes-soft.com/song_id_service.php';
   static const String iosICloudContainerId = 'iCloud.com.aimessoft.misuzumusic';
 
+  // Temporarily disable the iCloud mount option in the UI while the feature is
+  // unavailable. Set to `true` to re-enable.
+  static const bool iosICloudEnabled = false;
+
   // Settings Keys
   static const String settingsVolume = 'volume';
   static const String settingsMusicFolderPath = 'music_folder_path';
