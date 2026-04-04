@@ -23,6 +23,7 @@ import '../../../data/services/netease_id_resolver.dart';
 import '../../../data/models/netease_models.dart';
 import '../../../core/services/lrc_export_service.dart';
 import '../../../core/services/desktop_lyrics_bridge.dart';
+import '../../../core/settings/lyrics_interaction_controller.dart';
 import '../../../core/constants/app_constants.dart';
 import '../../../domain/entities/lyrics_entities.dart';
 import '../../../domain/entities/music_entities.dart';
@@ -76,6 +77,7 @@ class _LyricsOverlayState extends State<LyricsOverlay> {
   late final DesktopLyricsBridge _desktopLyricsBridge;
   late final SongDetailService _songDetailService;
   late final NeteaseIdResolver _neteaseIdResolver;
+  late final LyricsInteractionController _lyricsInteractionController;
   static bool _lastTranslationPreference = true;
   static LyricsVisualStyle _lastLyricsStyle = LyricsVisualStyle.highlight;
   bool _showTranslation = _lastTranslationPreference;
@@ -110,6 +112,14 @@ class _LyricsOverlayState extends State<LyricsOverlay> {
   static final Map<String, Color?> _artworkGlowCache = {};
   bool? _lastNotifiedLyricsPageActive;
 
+  LyricsInteractionController _resolveLyricsInteractionController() {
+    if (!sl.isRegistered<LyricsInteractionController>()) {
+      sl.registerLazySingleton(() => LyricsInteractionController(sl()));
+      unawaited(sl<LyricsInteractionController>().load());
+    }
+    return sl<LyricsInteractionController>();
+  }
+
   @override
   void initState() {
     super.initState();
@@ -118,7 +128,9 @@ class _LyricsOverlayState extends State<LyricsOverlay> {
     _desktopLyricsBridge = sl<DesktopLyricsBridge>();
     _songDetailService = sl<SongDetailService>();
     _neteaseIdResolver = sl<NeteaseIdResolver>();
+    _lyricsInteractionController = _resolveLyricsInteractionController();
     _lyricsCubit = context.read<LyricsCubit>();
+    _lyricsInteractionController.addListener(_handleLyricsInteractionSettingChanged);
     _ensureLyricsLoaded(_currentTrack);
     _resetDesktopLineCache();
     _loadArtworkGlowColor(_currentTrack);
@@ -176,6 +188,9 @@ class _LyricsOverlayState extends State<LyricsOverlay> {
 
   @override
   void dispose() {
+    _lyricsInteractionController.removeListener(
+      _handleLyricsInteractionSettingChanged,
+    );
     if (_desktopLyricsActive) {
       _desktopLyricsActive = false;
       unawaited(_desktopLyricsBridge.clear());
@@ -464,6 +479,31 @@ class _LyricsOverlayState extends State<LyricsOverlay> {
         currentState.lyrics.trackId != track.id;
     if (needsLoad) {
       unawaited(_lyricsCubit.loadLyricsForTrack(track));
+      return;
+    }
+
+    _hydrateActiveLyricsFromState(currentState, track.id);
+  }
+
+  void _hydrateActiveLyricsFromState(LyricsState state, String trackId) {
+    if (state is! LyricsLoaded) {
+      return;
+    }
+    if (state.lyrics.trackId != trackId || state.lyrics.lines.isEmpty) {
+      return;
+    }
+
+    _activeLyricsLines = state.lyrics.lines;
+    _activeDesktopIndex = -1;
+    _activeDesktopLine = null;
+    _lastDesktopPayloadSignature = null;
+    _resetDesktopLineCache();
+    _syncDesktopLyricsState();
+
+    if (!kReleaseMode) {
+      debugPrint(
+        '🎼 CoverPreview: hydrated from existing LyricsState, trackId=$trackId, lines=${state.lyrics.lines.length}',
+      );
     }
   }
 
@@ -494,10 +534,31 @@ class _LyricsOverlayState extends State<LyricsOverlay> {
     if (!mounted) {
       return;
     }
-    final stages = _CompactLyricsStage.values;
-    final nextIndex = (_compactLyricsStage.index + 1) % stages.length;
-    final nextStage = stages[nextIndex];
+    final bool allowDetailPage =
+        _lyricsInteractionController.enableCompactDetailPage;
+    final _CompactLyricsStage nextStage;
+    if (allowDetailPage) {
+      final stages = _CompactLyricsStage.values;
+      final nextIndex = (_compactLyricsStage.index + 1) % stages.length;
+      nextStage = stages[nextIndex];
+    } else {
+      nextStage = _compactLyricsStage == _CompactLyricsStage.cover
+          ? _CompactLyricsStage.lyrics
+          : _CompactLyricsStage.cover;
+    }
     _setCompactLyricsStage(nextStage);
+  }
+
+  void _handleLyricsInteractionSettingChanged() {
+    if (!mounted) {
+      return;
+    }
+    if (_lyricsInteractionController.enableCompactDetailPage) {
+      return;
+    }
+    if (_compactLyricsStage == _CompactLyricsStage.detail) {
+      _setCompactLyricsStage(_CompactLyricsStage.cover);
+    }
   }
 
   void _setCompactLyricsStage(_CompactLyricsStage stage) {
@@ -985,11 +1046,48 @@ class _LyricsOverlayState extends State<LyricsOverlay> {
   }
 
   LyricsLine? _resolveNextDesktopLine() {
-    final nextIndex = _activeDesktopIndex + 1;
-    if (nextIndex < 0 || nextIndex >= _activeLyricsLines.length) {
+    return _resolveNextLineAfter(_activeDesktopLine);
+  }
+
+  LyricsLine? _resolveCoverPreviewLine() {
+    if (_activeDesktopLine != null && !_isLyricsLineVisuallyEmpty(_activeDesktopLine)) {
+      return _activeDesktopLine;
+    }
+    for (final line in _activeLyricsLines) {
+      if (!_isLyricsLineVisuallyEmpty(line)) {
+        return line;
+      }
+    }
+    return null;
+  }
+
+  LyricsLine? _resolveNextLineAfter(LyricsLine? baseLine) {
+    if (baseLine == null || _activeLyricsLines.isEmpty) {
       return null;
     }
-    return _activeLyricsLines[nextIndex];
+    final int baseIndex = _activeLyricsLines.indexOf(baseLine);
+    if (baseIndex < 0) {
+      return null;
+    }
+    for (int i = baseIndex + 1; i < _activeLyricsLines.length; i++) {
+      final line = _activeLyricsLines[i];
+      if (!_isLyricsLineVisuallyEmpty(line)) {
+        return line;
+      }
+    }
+    return null;
+  }
+
+  bool _isLyricsLineVisuallyEmpty(LyricsLine? line) {
+    if (line == null) {
+      return true;
+    }
+    if (line.originalText.trim().isNotEmpty) {
+      return false;
+    }
+    return line.annotatedTexts.every(
+      (segment) => segment.original.trim().isEmpty,
+    );
   }
 
   String? _lineTranslation(LyricsLine? line) {
@@ -1206,6 +1304,28 @@ class _LyricsOverlayState extends State<LyricsOverlay> {
     final bool playingChanged = playing != _isPlaying;
     _isPlaying = playing;
     _currentPosition = position;
+
+    if (_activeLyricsLines.isNotEmpty) {
+      final int previousIndex = _activeDesktopIndex;
+      final LyricsLine? previousLine = _activeDesktopLine;
+      _syncDesktopLyricsState();
+
+      final bool activeLyricChanged =
+          previousIndex != _activeDesktopIndex ||
+          previousLine != _activeDesktopLine;
+      if (activeLyricChanged && mounted) {
+        if (!kReleaseMode) {
+          final String preview =
+              _activeDesktopLine?.originalText.trim().isNotEmpty == true
+              ? _activeDesktopLine!.originalText.trim()
+              : '(空行)';
+          debugPrint(
+            '🎼 CoverPreview: active line -> index=$_activeDesktopIndex text="$preview"',
+          );
+        }
+        setState(() {});
+      }
+    }
 
     if (notify && playingChanged) {
       _scheduleDesktopLyricsUpdate(force: true);
@@ -1581,6 +1701,8 @@ class _LyricsOverlayState extends State<LyricsOverlay> {
   @override
   Widget build(BuildContext context) {
     final bool isMac = widget.isMac;
+    final LyricsLine? previewLine = _resolveCoverPreviewLine();
+    final LyricsLine? previewNextLine = _resolveNextLineAfter(previewLine);
 
     return BlocListener<LyricsCubit, LyricsState>(
       listener: (context, state) {
@@ -1588,6 +1710,11 @@ class _LyricsOverlayState extends State<LyricsOverlay> {
           _resetScroll();
         }
         if (state is LyricsLoaded) {
+          if (!kReleaseMode) {
+            debugPrint(
+              '🎼 CoverPreview: LyricsLoaded lyricsTrackId=${state.lyrics.trackId}, currentTrackId=${_currentTrack.id}, lines=${state.lyrics.lines.length}',
+            );
+          }
           if (mounted) {
             setState(() {
               _activeLyricsLines = state.lyrics.lines;
@@ -1659,8 +1786,8 @@ class _LyricsOverlayState extends State<LyricsOverlay> {
         trackQualityLabel: _trackQualityLabel,
         compactStage: _compactLyricsStage,
         onCycleCompactStage: _cycleCompactLyricsStage,
-        activeLyricLine: _activeDesktopLine,
-        nextLyricLine: _resolveNextDesktopLine(),
+        activeLyricLine: previewLine,
+        nextLyricLine: previewNextLine,
       ),
     );
   }
@@ -2043,26 +2170,15 @@ class _CoverColumn extends StatelessWidget {
         ? MacosTheme.of(context).brightness == Brightness.dark
         : Theme.of(context).brightness == Brightness.dark;
     final String? qualityText = this.qualityText;
-    final bool hasLoadedLyrics = context.select<LyricsCubit, bool>((cubit) {
-      final state = cubit.state;
-      return state is LyricsLoaded &&
-          state.lyrics.trackId == track.id &&
-          state.lyrics.lines.isNotEmpty;
-    });
     final bool showLyricPreview =
         showCompactLyricsPreview &&
-        hasLoadedLyrics &&
         activeLyricLine != null &&
         !_isLineVisuallyEmpty(activeLyricLine);
 
     return LayoutBuilder(
       builder: (context, constraints) {
-        final double topPadding = showLyricPreview
-            ? math.max(28.0, constraints.maxHeight * 0.04)
-            : 0.0;
-        final double bottomPadding = showLyricPreview
-            ? math.max(bottomInset + 18, 32.0)
-            : 0.0;
+        final double topPadding = showLyricPreview ? 48.0 : 0.0;
+        final double bottomPadding = 0.0;
 
         return SingleChildScrollView(
           physics: const BouncingScrollPhysics(),
@@ -2080,9 +2196,7 @@ class _CoverColumn extends StatelessWidget {
               ),
             ),
             child: Column(
-              mainAxisAlignment: showLyricPreview
-                  ? MainAxisAlignment.start
-                  : MainAxisAlignment.center,
+              mainAxisAlignment: MainAxisAlignment.center,
               children: [
                 GestureDetector(
                   onTap: onTap,
@@ -2156,7 +2270,7 @@ class _CoverColumn extends StatelessWidget {
                   ),
                 ),
                 if (showLyricPreview) ...[
-                  const SizedBox(height: 18),
+                  const SizedBox(height: 14),
                   SizedBox(
                     width: math.min(520, coverSize * 1.5),
                     child: _CompactLyricsPreview(
@@ -2206,18 +2320,13 @@ class _CompactLyricsPreview extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final Color surfaceColor = isDarkMode
-        ? Colors.white.withOpacity(0.06)
-        : Colors.black.withOpacity(0.04);
-    final Color borderColor = (isDarkMode ? Colors.white : Colors.black)
-        .withOpacity(isDarkMode ? 0.12 : 0.08);
     final Color primaryColor = isDarkMode
         ? Colors.white.withOpacity(0.96)
         : Colors.black.withOpacity(0.88);
     final Color secondaryColor = isDarkMode
         ? Colors.white.withOpacity(0.68)
         : Colors.black.withOpacity(0.56);
-    final TextStyle fallbackPrimary =
+    final TextStyle primaryStyle =
         theme.textTheme.titleMedium?.copyWith(
           fontWeight: FontWeight.w600,
           height: 1.25,
@@ -2229,21 +2338,18 @@ class _CompactLyricsPreview extends StatelessWidget {
           height: 1.25,
           color: primaryColor,
         );
-    final TextStyle primaryStyle = fallbackPrimary;
     final TextStyle secondaryStyle =
-        (theme.textTheme.bodyMedium?.copyWith(
+        theme.textTheme.bodyMedium?.copyWith(
           height: 1.25,
           color: secondaryColor,
         ) ??
-        TextStyle(fontSize: 14, height: 1.25, color: secondaryColor));
+        TextStyle(fontSize: 14, height: 1.25, color: secondaryColor);
 
     final String? translatedText = showTranslation
         ? _trimToNull(line.translatedText)
         : null;
     final LyricsLine? secondaryLyricLine = translatedText == null
-        ? _lineHasContent(nextLine)
-              ? nextLine
-              : null
+        ? (_lineHasContent(nextLine) ? nextLine : null)
         : null;
     final bool hasSecondary =
         translatedText != null || secondaryLyricLine != null;
@@ -2255,69 +2361,63 @@ class _CompactLyricsPreview extends StatelessWidget {
       secondaryLyricLine?.originalText ?? '',
     ].join('_');
 
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: surfaceColor,
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: borderColor),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
-        child: AnimatedSwitcher(
-          duration: _animationDuration,
-          switchInCurve: Curves.easeOutCubic,
-          switchOutCurve: Curves.easeInCubic,
-          transitionBuilder: (child, animation) {
-            final curved = CurvedAnimation(
-              parent: animation,
-              curve: Curves.easeOutCubic,
-              reverseCurve: Curves.easeInCubic,
-            );
-            return FadeTransition(
-              opacity: curved,
-              child: SlideTransition(
-                position: Tween<Offset>(
-                  begin: const Offset(0, 0.18),
-                  end: Offset.zero,
-                ).animate(curved),
-                child: child,
-              ),
-            );
-          },
-          child: Column(
-            key: ValueKey(animationKey),
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              _CompactLyricsPreviewLine(
-                line: line,
-                style: primaryStyle,
-                maxLines: hasSecondary ? 1 : 2,
-                textAlign: TextAlign.center,
-              ),
-              if (translatedText != null) ...[
-                const SizedBox(height: 8),
-                Text(
-                  translatedText,
-                  locale: const Locale('zh-Hans', 'zh'),
-                  textAlign: TextAlign.center,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: secondaryStyle,
-                ),
-              ] else if (secondaryLyricLine != null) ...[
-                const SizedBox(height: 8),
-                _CompactLyricsPreviewLine(
-                  line: secondaryLyricLine,
-                  style: secondaryStyle,
-                  maxLines: 1,
-                  textAlign: TextAlign.center,
-                ),
-              ],
-            ],
+    return AnimatedSwitcher(
+      duration: _animationDuration,
+      switchInCurve: Curves.easeOutCubic,
+      switchOutCurve: Curves.easeInCubic,
+      transitionBuilder: (child, animation) {
+        final curved = CurvedAnimation(
+          parent: animation,
+          curve: Curves.easeOutCubic,
+          reverseCurve: Curves.easeInCubic,
+        );
+        return FadeTransition(
+          opacity: curved,
+          child: SlideTransition(
+            position: Tween<Offset>(
+              begin: const Offset(0, 0.12),
+              end: Offset.zero,
+            ).animate(curved),
+            child: child,
           ),
-        ),
+        );
+      },
+      child: Column(
+        key: ValueKey(animationKey),
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _CompactLyricsPreviewLine(
+            line: line,
+            style: primaryStyle,
+            maxLines: hasSecondary ? 1 : 2,
+            textAlign: TextAlign.center,
+          ),
+          if (translatedText != null) ...[
+            const SizedBox(height: 6),
+            Text(
+              translatedText,
+              textAlign: TextAlign.center,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: secondaryStyle,
+            ),
+          ] else if (secondaryLyricLine != null) ...[
+            const SizedBox(height: 8),
+            _CompactLyricsPreviewLine(
+              line: secondaryLyricLine,
+              style: secondaryStyle,
+              maxLines: 1,
+              textAlign: TextAlign.center,
+            ),
+          ],
+        ],
       ),
     );
+  }
+
+  String? _trimToNull(String? value) {
+    final String trimmed = value?.trim() ?? '';
+    return trimmed.isEmpty ? null : trimmed;
   }
 
   bool _lineHasContent(LyricsLine? candidate) {
@@ -2330,11 +2430,6 @@ class _CompactLyricsPreview extends StatelessWidget {
     return candidate.annotatedTexts.any(
       (segment) => segment.original.trim().isNotEmpty,
     );
-  }
-
-  String? _trimToNull(String? value) {
-    final String trimmed = value?.trim() ?? '';
-    return trimmed.isEmpty ? null : trimmed;
   }
 }
 
