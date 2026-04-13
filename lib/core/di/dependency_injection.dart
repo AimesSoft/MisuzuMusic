@@ -31,6 +31,7 @@ import '../../domain/services/audio_player_service.dart';
 import '../../domain/usecases/music_usecases.dart';
 import '../../domain/usecases/player_usecases.dart';
 import '../localization/locale_controller.dart';
+import '../settings/lyrics_interaction_controller.dart';
 import '../settings/online_metadata_controller.dart';
 import '../theme/theme_controller.dart';
 import '../../domain/usecases/lyrics_usecases.dart';
@@ -149,6 +150,7 @@ class DependencyInjection {
       sl.registerLazySingleton(() => ThemeController(sl()));
       sl.registerLazySingleton(() => LocaleController(sl()));
       sl.registerLazySingleton(() => OnlineMetadataController(sl()));
+      sl.registerLazySingleton(() => LyricsInteractionController(sl()));
 
       // Use cases
       print('⚙️ 注册用例...');
@@ -202,6 +204,7 @@ class DependencyInjection {
       await sl<ThemeController>().load();
       await sl<LocaleController>().load();
       await sl<OnlineMetadataController>().load();
+      await sl<LyricsInteractionController>().load();
 
       print('✅ 依赖注入初始化完成！');
     } catch (e) {

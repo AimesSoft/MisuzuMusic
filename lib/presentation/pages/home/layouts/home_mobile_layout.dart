@@ -40,10 +40,7 @@ extension _HomePageMobileLayout on _HomePageContentState {
         final theme = Theme.of(context);
         final bool isDarkMode = theme.brightness == Brightness.dark;
         final Color fallbackColor = theme.colorScheme.surface;
-        final bool hideNowPlayingForLyricsPage =
-            _lyricsVisible && _lyricsPageActive;
-        final bool showNowPlayingBar =
-            _mobileNowPlayingBarVisible && !hideNowPlayingForLyricsPage;
+        final bool showNowPlayingBar = _mobileNowPlayingBarVisible;
         final bool showNavigationBar = !_lyricsVisible;
         final double safeAreaBottomInset = mediaQuery.padding.bottom;
         const double nowPlayingBarNavGap = 16.0;
@@ -61,10 +58,11 @@ extension _HomePageMobileLayout on _HomePageContentState {
             : _FrostedLegacyCupertinoTabBar.barHeight;
         final double navigationBarBottomInset =
             showNavigationBar && navigationBarOverlaysBody
-                ? safeAreaBottomInset + navigationBarHeight
-                : 0.0;
-        final double nowPlayingGapInset =
-            showNowPlayingBar && showNavigationBar ? nowPlayingBarNavGap : 0.0;
+            ? safeAreaBottomInset + navigationBarHeight
+            : 0.0;
+        final double nowPlayingGapInset = showNowPlayingBar && showNavigationBar
+            ? nowPlayingBarNavGap
+            : 0.0;
 
         final mainContent = KeyedSubtree(
           key: const ValueKey<String>('mobile_content_stack'),
@@ -72,10 +70,13 @@ extension _HomePageMobileLayout on _HomePageContentState {
         );
 
         final double nowPlayingBottomInset =
-            (showNavigationBar ? navigationBarBottomInset : safeAreaBottomInset) +
+            (showNavigationBar
+                ? navigationBarBottomInset
+                : safeAreaBottomInset) +
             nowPlayingGapInset;
         final double lyricsBottomInset =
-            nowPlayingBottomInset + _HomePageContentState._mobileNowPlayingBarHeight;
+            nowPlayingBottomInset +
+            _HomePageContentState._mobileNowPlayingBarHeight;
 
         final layeredBody = SafeArea(
           top: false,
@@ -119,14 +120,17 @@ extension _HomePageMobileLayout on _HomePageContentState {
                   switchInCurve: Curves.easeOutQuad,
                   switchOutCurve: Curves.easeInQuad,
                   transitionBuilder: (child, animation) {
-                    final slide = Tween<Offset>(
-                      begin: const Offset(0, 0.12),
-                      end: Offset.zero,
-                    ).animate(CurvedAnimation(
-                      parent: animation,
-                      curve: Curves.easeOutQuad,
-                      reverseCurve: Curves.easeInQuad,
-                    ));
+                    final slide =
+                        Tween<Offset>(
+                          begin: const Offset(0, 0.12),
+                          end: Offset.zero,
+                        ).animate(
+                          CurvedAnimation(
+                            parent: animation,
+                            curve: Curves.easeOutQuad,
+                            reverseCurve: Curves.easeInQuad,
+                          ),
+                        );
                     return FadeTransition(
                       opacity: animation,
                       child: SlideTransition(position: slide, child: child),
@@ -198,8 +202,9 @@ extension _HomePageMobileLayout on _HomePageContentState {
         final scrollAwareBody = interactiveBody;
 
         final visibleSectionIndices = _mobileDestinationSectionIndices;
-        final navSelectedIndex =
-            _navigationSelectedIndex(visibleSectionIndices);
+        final navSelectedIndex = _navigationSelectedIndex(
+          visibleSectionIndices,
+        );
         final navItems = _mobileDestinations;
         void handleNavigationTap(int visibleIndex) {
           final targetSection = visibleSectionIndices[visibleIndex];

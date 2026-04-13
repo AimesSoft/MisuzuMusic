@@ -23,6 +23,7 @@ import '../../../data/services/netease_id_resolver.dart';
 import '../../../data/models/netease_models.dart';
 import '../../../core/services/lrc_export_service.dart';
 import '../../../core/services/desktop_lyrics_bridge.dart';
+import '../../../core/settings/lyrics_interaction_controller.dart';
 import '../../../core/constants/app_constants.dart';
 import '../../../domain/entities/lyrics_entities.dart';
 import '../../../domain/entities/music_entities.dart';
@@ -31,6 +32,7 @@ import '../../blocs/lyrics/lyrics_cubit.dart';
 import '../../blocs/player/player_bloc.dart';
 import '../../widgets/common/artwork_thumbnail.dart';
 import '../../widgets/common/hover_glow_overlay.dart';
+import '../../widgets/common/furigana_text.dart';
 import '../../widgets/common/lyrics_display.dart';
 import '../../../core/constants/jellyfin_library_constants.dart';
 import '../../../core/constants/mystery_library_constants.dart';
@@ -47,7 +49,6 @@ final RegExp _desktopLyricsHanCharacterRegExp = RegExp(
 );
 
 const double _compactLayoutWidthThreshold = 860.0;
-const double _kMobileNowPlayingBarHeight = 118.0;
 
 enum _CompactLyricsStage { cover, lyrics, detail }
 
@@ -76,6 +77,7 @@ class _LyricsOverlayState extends State<LyricsOverlay> {
   late final DesktopLyricsBridge _desktopLyricsBridge;
   late final SongDetailService _songDetailService;
   late final NeteaseIdResolver _neteaseIdResolver;
+  late final LyricsInteractionController _lyricsInteractionController;
   static bool _lastTranslationPreference = true;
   static LyricsVisualStyle _lastLyricsStyle = LyricsVisualStyle.highlight;
   bool _showTranslation = _lastTranslationPreference;
@@ -110,6 +112,14 @@ class _LyricsOverlayState extends State<LyricsOverlay> {
   static final Map<String, Color?> _artworkGlowCache = {};
   bool? _lastNotifiedLyricsPageActive;
 
+  LyricsInteractionController _resolveLyricsInteractionController() {
+    if (!sl.isRegistered<LyricsInteractionController>()) {
+      sl.registerLazySingleton(() => LyricsInteractionController(sl()));
+      unawaited(sl<LyricsInteractionController>().load());
+    }
+    return sl<LyricsInteractionController>();
+  }
+
   @override
   void initState() {
     super.initState();
@@ -118,7 +128,9 @@ class _LyricsOverlayState extends State<LyricsOverlay> {
     _desktopLyricsBridge = sl<DesktopLyricsBridge>();
     _songDetailService = sl<SongDetailService>();
     _neteaseIdResolver = sl<NeteaseIdResolver>();
+    _lyricsInteractionController = _resolveLyricsInteractionController();
     _lyricsCubit = context.read<LyricsCubit>();
+    _lyricsInteractionController.addListener(_handleLyricsInteractionSettingChanged);
     _ensureLyricsLoaded(_currentTrack);
     _resetDesktopLineCache();
     _loadArtworkGlowColor(_currentTrack);
@@ -176,6 +188,9 @@ class _LyricsOverlayState extends State<LyricsOverlay> {
 
   @override
   void dispose() {
+    _lyricsInteractionController.removeListener(
+      _handleLyricsInteractionSettingChanged,
+    );
     if (_desktopLyricsActive) {
       _desktopLyricsActive = false;
       unawaited(_desktopLyricsBridge.clear());
@@ -464,6 +479,31 @@ class _LyricsOverlayState extends State<LyricsOverlay> {
         currentState.lyrics.trackId != track.id;
     if (needsLoad) {
       unawaited(_lyricsCubit.loadLyricsForTrack(track));
+      return;
+    }
+
+    _hydrateActiveLyricsFromState(currentState, track.id);
+  }
+
+  void _hydrateActiveLyricsFromState(LyricsState state, String trackId) {
+    if (state is! LyricsLoaded) {
+      return;
+    }
+    if (state.lyrics.trackId != trackId || state.lyrics.lines.isEmpty) {
+      return;
+    }
+
+    _activeLyricsLines = state.lyrics.lines;
+    _activeDesktopIndex = -1;
+    _activeDesktopLine = null;
+    _lastDesktopPayloadSignature = null;
+    _resetDesktopLineCache();
+    _syncDesktopLyricsState();
+
+    if (!kReleaseMode) {
+      debugPrint(
+        '🎼 CoverPreview: hydrated from existing LyricsState, trackId=$trackId, lines=${state.lyrics.lines.length}',
+      );
     }
   }
 
@@ -494,10 +534,31 @@ class _LyricsOverlayState extends State<LyricsOverlay> {
     if (!mounted) {
       return;
     }
-    final stages = _CompactLyricsStage.values;
-    final nextIndex = (_compactLyricsStage.index + 1) % stages.length;
-    final nextStage = stages[nextIndex];
+    final bool allowDetailPage =
+        _lyricsInteractionController.enableCompactDetailPage;
+    final _CompactLyricsStage nextStage;
+    if (allowDetailPage) {
+      final stages = _CompactLyricsStage.values;
+      final nextIndex = (_compactLyricsStage.index + 1) % stages.length;
+      nextStage = stages[nextIndex];
+    } else {
+      nextStage = _compactLyricsStage == _CompactLyricsStage.cover
+          ? _CompactLyricsStage.lyrics
+          : _CompactLyricsStage.cover;
+    }
     _setCompactLyricsStage(nextStage);
+  }
+
+  void _handleLyricsInteractionSettingChanged() {
+    if (!mounted) {
+      return;
+    }
+    if (_lyricsInteractionController.enableCompactDetailPage) {
+      return;
+    }
+    if (_compactLyricsStage == _CompactLyricsStage.detail) {
+      _setCompactLyricsStage(_CompactLyricsStage.cover);
+    }
   }
 
   void _setCompactLyricsStage(_CompactLyricsStage stage) {
@@ -553,15 +614,6 @@ class _LyricsOverlayState extends State<LyricsOverlay> {
   }
 
   double _resolveBottomSafeInset(BuildContext context) {
-    if (_isLyricsPageActive(context)) {
-      final double safeAreaBottom = MediaQuery.of(context).padding.bottom;
-      final double resolved =
-          (widget.bottomSafeInset - _kMobileNowPlayingBarHeight).clamp(
-            0.0,
-            double.infinity,
-          );
-      return math.max(safeAreaBottom, resolved);
-    }
     return widget.bottomSafeInset;
   }
 
@@ -994,11 +1046,48 @@ class _LyricsOverlayState extends State<LyricsOverlay> {
   }
 
   LyricsLine? _resolveNextDesktopLine() {
-    final nextIndex = _activeDesktopIndex + 1;
-    if (nextIndex < 0 || nextIndex >= _activeLyricsLines.length) {
+    return _resolveNextLineAfter(_activeDesktopLine);
+  }
+
+  LyricsLine? _resolveCoverPreviewLine() {
+    if (_activeDesktopLine != null && !_isLyricsLineVisuallyEmpty(_activeDesktopLine)) {
+      return _activeDesktopLine;
+    }
+    for (final line in _activeLyricsLines) {
+      if (!_isLyricsLineVisuallyEmpty(line)) {
+        return line;
+      }
+    }
+    return null;
+  }
+
+  LyricsLine? _resolveNextLineAfter(LyricsLine? baseLine) {
+    if (baseLine == null || _activeLyricsLines.isEmpty) {
       return null;
     }
-    return _activeLyricsLines[nextIndex];
+    final int baseIndex = _activeLyricsLines.indexOf(baseLine);
+    if (baseIndex < 0) {
+      return null;
+    }
+    for (int i = baseIndex + 1; i < _activeLyricsLines.length; i++) {
+      final line = _activeLyricsLines[i];
+      if (!_isLyricsLineVisuallyEmpty(line)) {
+        return line;
+      }
+    }
+    return null;
+  }
+
+  bool _isLyricsLineVisuallyEmpty(LyricsLine? line) {
+    if (line == null) {
+      return true;
+    }
+    if (line.originalText.trim().isNotEmpty) {
+      return false;
+    }
+    return line.annotatedTexts.every(
+      (segment) => segment.original.trim().isEmpty,
+    );
   }
 
   String? _lineTranslation(LyricsLine? line) {
@@ -1216,6 +1305,28 @@ class _LyricsOverlayState extends State<LyricsOverlay> {
     _isPlaying = playing;
     _currentPosition = position;
 
+    if (_activeLyricsLines.isNotEmpty) {
+      final int previousIndex = _activeDesktopIndex;
+      final LyricsLine? previousLine = _activeDesktopLine;
+      _syncDesktopLyricsState();
+
+      final bool activeLyricChanged =
+          previousIndex != _activeDesktopIndex ||
+          previousLine != _activeDesktopLine;
+      if (activeLyricChanged && mounted) {
+        if (!kReleaseMode) {
+          final String preview =
+              _activeDesktopLine?.originalText.trim().isNotEmpty == true
+              ? _activeDesktopLine!.originalText.trim()
+              : '(空行)';
+          debugPrint(
+            '🎼 CoverPreview: active line -> index=$_activeDesktopIndex text="$preview"',
+          );
+        }
+        setState(() {});
+      }
+    }
+
     if (notify && playingChanged) {
       _scheduleDesktopLyricsUpdate(force: true);
     }
@@ -1285,9 +1396,19 @@ class _LyricsOverlayState extends State<LyricsOverlay> {
   }
 
   void _handleActiveLineChanged(LyricsLine? line) {
-    _activeDesktopLine = line;
-    if (line == null) {
-      _activeDesktopIndex = -1;
+    final bool changed = _activeDesktopLine != line;
+    if (mounted && changed) {
+      setState(() {
+        _activeDesktopLine = line;
+        if (line == null) {
+          _activeDesktopIndex = -1;
+        }
+      });
+    } else {
+      _activeDesktopLine = line;
+      if (line == null) {
+        _activeDesktopIndex = -1;
+      }
     }
     if (_desktopLyricsActive) {
       _scheduleDesktopLyricsUpdate();
@@ -1580,6 +1701,8 @@ class _LyricsOverlayState extends State<LyricsOverlay> {
   @override
   Widget build(BuildContext context) {
     final bool isMac = widget.isMac;
+    final LyricsLine? previewLine = _resolveCoverPreviewLine();
+    final LyricsLine? previewNextLine = _resolveNextLineAfter(previewLine);
 
     return BlocListener<LyricsCubit, LyricsState>(
       listener: (context, state) {
@@ -1587,21 +1710,47 @@ class _LyricsOverlayState extends State<LyricsOverlay> {
           _resetScroll();
         }
         if (state is LyricsLoaded) {
-          _activeLyricsLines = state.lyrics.lines;
-          _activeDesktopIndex = -1;
-          _activeDesktopLine = null;
-          _lastDesktopPayloadSignature = null;
-          _resetDesktopLineCache();
-          _syncDesktopLyricsState();
+          if (!kReleaseMode) {
+            debugPrint(
+              '🎼 CoverPreview: LyricsLoaded lyricsTrackId=${state.lyrics.trackId}, currentTrackId=${_currentTrack.id}, lines=${state.lyrics.lines.length}',
+            );
+          }
+          if (mounted) {
+            setState(() {
+              _activeLyricsLines = state.lyrics.lines;
+              _activeDesktopIndex = -1;
+              _activeDesktopLine = null;
+              _lastDesktopPayloadSignature = null;
+              _resetDesktopLineCache();
+              _syncDesktopLyricsState();
+            });
+          } else {
+            _activeLyricsLines = state.lyrics.lines;
+            _activeDesktopIndex = -1;
+            _activeDesktopLine = null;
+            _lastDesktopPayloadSignature = null;
+            _resetDesktopLineCache();
+            _syncDesktopLyricsState();
+          }
           if (_desktopLyricsActive) {
             _scheduleDesktopLyricsUpdate(force: true);
           }
         } else if (state is LyricsEmpty || state is LyricsError) {
-          _activeLyricsLines = const [];
-          _activeDesktopLine = null;
-          _activeDesktopIndex = -1;
-          _lastDesktopPayloadSignature = null;
-          _resetDesktopLineCache();
+          if (mounted) {
+            setState(() {
+              _activeLyricsLines = const [];
+              _activeDesktopLine = null;
+              _activeDesktopIndex = -1;
+              _lastDesktopPayloadSignature = null;
+              _resetDesktopLineCache();
+            });
+          } else {
+            _activeLyricsLines = const [];
+            _activeDesktopLine = null;
+            _activeDesktopIndex = -1;
+            _lastDesktopPayloadSignature = null;
+            _resetDesktopLineCache();
+          }
           if (_desktopLyricsActive) {
             _scheduleDesktopLyricsUpdate(force: true);
           }
@@ -1637,6 +1786,8 @@ class _LyricsOverlayState extends State<LyricsOverlay> {
         trackQualityLabel: _trackQualityLabel,
         compactStage: _compactLyricsStage,
         onCycleCompactStage: _cycleCompactLyricsStage,
+        activeLyricLine: previewLine,
+        nextLyricLine: previewNextLine,
       ),
     );
   }
@@ -1673,6 +1824,8 @@ class _LyricsLayout extends StatelessWidget {
     required this.trackQualityLabel,
     required this.compactStage,
     required this.onCycleCompactStage,
+    required this.activeLyricLine,
+    required this.nextLyricLine,
   });
 
   final Track track;
@@ -1704,6 +1857,8 @@ class _LyricsLayout extends StatelessWidget {
   final String? trackQualityLabel;
   final _CompactLyricsStage compactStage;
   final VoidCallback onCycleCompactStage;
+  final LyricsLine? activeLyricLine;
+  final LyricsLine? nextLyricLine;
 
   @override
   Widget build(BuildContext context) {
@@ -1756,6 +1911,11 @@ class _LyricsLayout extends StatelessWidget {
                 isMac: isMac,
                 onTap: onCycleCompactStage,
                 qualityText: trackQualityLabel,
+                bottomInset: bottomSafeInset,
+                activeLyricLine: activeLyricLine,
+                nextLyricLine: nextLyricLine,
+                showTranslation: showTranslation,
+                showCompactLyricsPreview: !lyricsHidden,
               ),
             );
 
@@ -1832,6 +1992,9 @@ class _LyricsLayout extends StatelessWidget {
                     onEditDetail: onEditTrackDetail,
                     qualityText: trackQualityLabel,
                     isCompactLayout: false,
+                    activeLyricLine: activeLyricLine,
+                    nextLyricLine: nextLyricLine,
+                    showTranslation: showTranslation,
                   ),
                 ),
                 Container(
@@ -1876,6 +2039,9 @@ class _TrackInfoPanel extends StatelessWidget {
     required this.onEditDetail,
     this.qualityText,
     this.isCompactLayout = false,
+    this.activeLyricLine,
+    this.nextLyricLine,
+    this.showTranslation = true,
   });
 
   final Track track;
@@ -1891,6 +2057,9 @@ class _TrackInfoPanel extends StatelessWidget {
   final VoidCallback onEditDetail;
   final String? qualityText;
   final bool isCompactLayout;
+  final LyricsLine? activeLyricLine;
+  final LyricsLine? nextLyricLine;
+  final bool showTranslation;
 
   @override
   Widget build(BuildContext context) {
@@ -1920,6 +2089,10 @@ class _TrackInfoPanel extends StatelessWidget {
               isMac: isMac,
               onTap: onToggleDetail,
               qualityText: qualityText,
+              activeLyricLine: activeLyricLine,
+              nextLyricLine: nextLyricLine,
+              showTranslation: showTranslation,
+              showCompactLyricsPreview: isCompactLayout,
             ),
     );
   }
@@ -1933,6 +2106,11 @@ class _CoverColumn extends StatelessWidget {
     required this.isMac,
     required this.onTap,
     this.qualityText,
+    this.bottomInset = 0,
+    this.activeLyricLine,
+    this.nextLyricLine,
+    this.showTranslation = true,
+    this.showCompactLyricsPreview = false,
   });
 
   final Track track;
@@ -1940,6 +2118,11 @@ class _CoverColumn extends StatelessWidget {
   final bool isMac;
   final VoidCallback onTap;
   final String? qualityText;
+  final double bottomInset;
+  final LyricsLine? activeLyricLine;
+  final LyricsLine? nextLyricLine;
+  final bool showTranslation;
+  final bool showCompactLyricsPreview;
 
   @override
   Widget build(BuildContext context) {
@@ -1968,8 +2151,9 @@ class _CoverColumn extends StatelessWidget {
     if (track.sourceType == TrackSourceType.netease) {
       remoteArtworkUrl = track.httpHeaders?['x-netease-cover'];
     } else if (track.isJellyfinTrack) {
-      remoteArtworkUrl =
-          JellyfinLibraryConstants.buildArtworkUrl(track.httpHeaders);
+      remoteArtworkUrl = JellyfinLibraryConstants.buildArtworkUrl(
+        track.httpHeaders,
+      );
     } else {
       remoteArtworkUrl =
           MysteryLibraryConstants.buildArtworkUrl(
@@ -1986,85 +2170,319 @@ class _CoverColumn extends StatelessWidget {
         ? MacosTheme.of(context).brightness == Brightness.dark
         : Theme.of(context).brightness == Brightness.dark;
     final String? qualityText = this.qualityText;
+    final bool showLyricPreview =
+        showCompactLyricsPreview &&
+        activeLyricLine != null &&
+        !_isLineVisuallyEmpty(activeLyricLine);
 
-    return Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          GestureDetector(
-            onTap: onTap,
-            behavior: HitTestBehavior.opaque,
-            child: HoverGlowOverlay(
-              isDarkMode: isDarkMode,
-              borderRadius: BorderRadius.circular(24),
-              glowRadius: 1.05,
-              glowOpacity: 0.85,
-              blurSigma: 0,
-              cursor: SystemMouseCursors.click,
-              child: ArtworkThumbnail(
-                artworkPath: track.artworkPath,
-                remoteImageUrl: remoteArtworkUrl,
-                size: coverSize,
-                borderRadius: BorderRadius.circular(20),
-                backgroundColor: isMac
-                    ? MacosColors.controlBackgroundColor
-                    : Theme.of(context).colorScheme.surfaceVariant,
-                borderColor: isMac
-                    ? MacosTheme.of(context).dividerColor
-                    : Theme.of(context).dividerColor,
-                placeholder: Icon(
-                  CupertinoIcons.music_note,
-                  color: isMac
-                      ? MacosColors.systemGrayColor
-                      : Theme.of(context).hintColor.withOpacity(0.6),
-                  size: coverSize * 0.28,
-                ),
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final double topPadding = showLyricPreview ? 48.0 : 0.0;
+        final double bottomPadding = math.max(0.0, bottomInset);
+
+        return SingleChildScrollView(
+          physics: const BouncingScrollPhysics(),
+          padding: EdgeInsets.only(
+            left: 20,
+            right: 20,
+            top: topPadding,
+            bottom: bottomPadding,
+          ),
+          child: ConstrainedBox(
+            constraints: BoxConstraints(
+              minHeight: math.max(
+                0,
+                constraints.maxHeight - topPadding - bottomPadding,
               ),
             ),
-          ),
-          const SizedBox(height: 24),
-          SizedBox(
-            width: math.min(480, coverSize * 1.35),
             child: Column(
-              crossAxisAlignment: CrossAxisAlignment.center,
+              mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                Text(
-                  track.title,
-                  textAlign: TextAlign.center,
-                  locale: Locale("zh-Hans", "zh"),
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: titleStyle,
+                GestureDetector(
+                  onTap: onTap,
+                  behavior: HitTestBehavior.opaque,
+                  child: HoverGlowOverlay(
+                    isDarkMode: isDarkMode,
+                    borderRadius: BorderRadius.circular(24),
+                    glowRadius: 1.05,
+                    glowOpacity: 0.85,
+                    blurSigma: 0,
+                    cursor: SystemMouseCursors.click,
+                    child: ArtworkThumbnail(
+                      artworkPath: track.artworkPath,
+                      remoteImageUrl: remoteArtworkUrl,
+                      size: coverSize,
+                      borderRadius: BorderRadius.circular(20),
+                      backgroundColor: isMac
+                          ? MacosColors.controlBackgroundColor
+                          : Theme.of(context).colorScheme.surfaceVariant,
+                      borderColor: isMac
+                          ? MacosTheme.of(context).dividerColor
+                          : Theme.of(context).dividerColor,
+                      placeholder: Icon(
+                        CupertinoIcons.music_note,
+                        color: isMac
+                            ? MacosColors.systemGrayColor
+                            : Theme.of(context).hintColor.withOpacity(0.6),
+                        size: coverSize * 0.28,
+                      ),
+                    ),
+                  ),
                 ),
-                const SizedBox(height: 8),
-                Text(
-                  '${track.artist} · ${track.album}',
-                  locale: Locale("zh-Hans", "zh"),
-                  textAlign: TextAlign.center,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: subtitleStyle,
+                const SizedBox(height: 24),
+                SizedBox(
+                  width: math.min(480, coverSize * 1.35),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                      Text(
+                        track.title,
+                        textAlign: TextAlign.center,
+                        locale: const Locale("zh-Hans", "zh"),
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: titleStyle,
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        '${track.artist} · ${track.album}',
+                        locale: const Locale("zh-Hans", "zh"),
+                        textAlign: TextAlign.center,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: subtitleStyle,
+                      ),
+                      if (qualityText != null) ...[
+                        const SizedBox(height: 6),
+                        Text(
+                          qualityText,
+                          locale: const Locale("zh-Hans", "zh"),
+                          textAlign: TextAlign.center,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: subtitleStyle.copyWith(
+                            fontSize: (subtitleStyle.fontSize ?? 14) - 1,
+                            color: subtitleStyle.color?.withOpacity(0.65),
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
                 ),
-                if (qualityText != null) ...[
-                  const SizedBox(height: 6),
-                  Text(
-                    qualityText,
-                    locale: const Locale("zh-Hans", "zh"),
-                    textAlign: TextAlign.center,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: subtitleStyle.copyWith(
-                      fontSize: (subtitleStyle.fontSize ?? 14) - 1,
-                      color: subtitleStyle.color?.withOpacity(0.65),
+                if (showLyricPreview) ...[
+                  const SizedBox(height: 14),
+                  SizedBox(
+                    width: math.min(520, coverSize * 1.5),
+                    child: _CompactLyricsPreview(
+                      line: activeLyricLine!,
+                      nextLine: nextLyricLine,
+                      isDarkMode: isDarkMode,
+                      showTranslation: showTranslation,
                     ),
                   ),
                 ],
               ],
             ),
           ),
+        );
+      },
+    );
+  }
+
+  bool _isLineVisuallyEmpty(LyricsLine? line) {
+    if (line == null) {
+      return true;
+    }
+    if (line.originalText.trim().isNotEmpty) {
+      return false;
+    }
+    return line.annotatedTexts.every(
+      (segment) => segment.original.trim().isEmpty,
+    );
+  }
+}
+
+class _CompactLyricsPreview extends StatelessWidget {
+  const _CompactLyricsPreview({
+    required this.line,
+    required this.isDarkMode,
+    this.nextLine,
+    this.showTranslation = true,
+  });
+
+  final LyricsLine line;
+  final LyricsLine? nextLine;
+  final bool isDarkMode;
+  final bool showTranslation;
+
+  static const Duration _animationDuration = Duration(milliseconds: 280);
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final Color primaryColor = isDarkMode
+        ? Colors.white.withOpacity(0.96)
+        : Colors.black.withOpacity(0.88);
+    final Color secondaryColor = isDarkMode
+        ? Colors.white.withOpacity(0.68)
+        : Colors.black.withOpacity(0.56);
+    final TextStyle primaryStyle =
+        theme.textTheme.titleMedium?.copyWith(
+          fontWeight: FontWeight.w600,
+          height: 1.25,
+          color: primaryColor,
+        ) ??
+        TextStyle(
+          fontSize: 16,
+          fontWeight: FontWeight.w600,
+          height: 1.25,
+          color: primaryColor,
+        );
+    final TextStyle secondaryStyle =
+        theme.textTheme.bodyMedium?.copyWith(
+          height: 1.25,
+          color: secondaryColor,
+        ) ??
+        TextStyle(fontSize: 14, height: 1.25, color: secondaryColor);
+
+    final String? translatedText = showTranslation
+        ? _trimToNull(line.translatedText)
+        : null;
+    final LyricsLine? secondaryLyricLine = translatedText == null
+        ? (_lineHasContent(nextLine) ? nextLine : null)
+        : null;
+    final bool hasSecondary =
+        translatedText != null || secondaryLyricLine != null;
+    final String animationKey = [
+      line.timestamp.inMilliseconds,
+      line.originalText,
+      translatedText ?? '',
+      secondaryLyricLine?.timestamp.inMilliseconds ?? -1,
+      secondaryLyricLine?.originalText ?? '',
+    ].join('_');
+
+    return AnimatedSwitcher(
+      duration: _animationDuration,
+      switchInCurve: Curves.easeOutCubic,
+      switchOutCurve: Curves.easeInCubic,
+      transitionBuilder: (child, animation) {
+        final curved = CurvedAnimation(
+          parent: animation,
+          curve: Curves.easeOutCubic,
+          reverseCurve: Curves.easeInCubic,
+        );
+        return FadeTransition(
+          opacity: curved,
+          child: SlideTransition(
+            position: Tween<Offset>(
+              begin: const Offset(0, 0.12),
+              end: Offset.zero,
+            ).animate(curved),
+            child: child,
+          ),
+        );
+      },
+      child: Column(
+        key: ValueKey(animationKey),
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _CompactLyricsPreviewLine(
+            line: line,
+            style: primaryStyle,
+            maxLines: hasSecondary ? 1 : 2,
+            textAlign: TextAlign.center,
+          ),
+          if (translatedText != null) ...[
+            const SizedBox(height: 6),
+            Text(
+              translatedText,
+              textAlign: TextAlign.center,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: secondaryStyle,
+            ),
+          ] else if (secondaryLyricLine != null) ...[
+            const SizedBox(height: 8),
+            _CompactLyricsPreviewLine(
+              line: secondaryLyricLine,
+              style: secondaryStyle,
+              maxLines: 1,
+              textAlign: TextAlign.center,
+            ),
+          ],
         ],
       ),
+    );
+  }
+
+  String? _trimToNull(String? value) {
+    final String trimmed = value?.trim() ?? '';
+    return trimmed.isEmpty ? null : trimmed;
+  }
+
+  bool _lineHasContent(LyricsLine? candidate) {
+    if (candidate == null) {
+      return false;
+    }
+    if (candidate.originalText.trim().isNotEmpty) {
+      return true;
+    }
+    return candidate.annotatedTexts.any(
+      (segment) => segment.original.trim().isNotEmpty,
+    );
+  }
+}
+
+class _CompactLyricsPreviewLine extends StatelessWidget {
+  const _CompactLyricsPreviewLine({
+    required this.line,
+    required this.style,
+    required this.maxLines,
+    this.textAlign = TextAlign.center,
+  });
+
+  final LyricsLine line;
+  final TextStyle style;
+  final int maxLines;
+  final TextAlign textAlign;
+
+  @override
+  Widget build(BuildContext context) {
+    final StrutStyle strutStyle = StrutStyle(
+      fontSize: style.fontSize,
+      height: style.height,
+      forceStrutHeight: true,
+    );
+
+    if (line.annotatedTexts.isNotEmpty) {
+      final double baseSize = style.fontSize ?? 16;
+      final TextStyle annotationStyle = style.copyWith(
+        fontSize: math.max(8.0, baseSize * 0.42),
+        fontWeight: FontWeight.w500,
+        height: 1.0,
+        color: style.color?.withOpacity(0.82),
+      );
+
+      return FuriganaText(
+        segments: line.annotatedTexts,
+        baseStyle: style,
+        annotationStyle: annotationStyle,
+        textAlign: textAlign,
+        maxLines: maxLines,
+        softWrap: true,
+        strutStyle: strutStyle,
+        annotationSpacing: -math.max(baseSize * 0.28, 4.0),
+      );
+    }
+
+    return Text(
+      line.originalText.trim(),
+      locale: const Locale('zh-Hans', 'zh'),
+      textAlign: textAlign,
+      maxLines: maxLines,
+      overflow: TextOverflow.ellipsis,
+      style: style,
+      strutStyle: strutStyle,
     );
   }
 }

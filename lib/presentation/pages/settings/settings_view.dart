@@ -11,6 +11,7 @@ import '../../../l10n/app_localizations.dart';
 
 import '../../../core/di/dependency_injection.dart';
 import '../../../core/localization/locale_controller.dart';
+import '../../../core/settings/lyrics_interaction_controller.dart';
 import '../../../core/settings/online_metadata_controller.dart';
 import '../../../core/theme/theme_controller.dart';
 import '../../../core/widgets/modal_dialog.dart';
@@ -41,13 +42,27 @@ Future<void> _openRepository(BuildContext context) async {
 class SettingsView extends StatelessWidget {
   const SettingsView({super.key});
 
+  LyricsInteractionController _resolveLyricsInteractionController() {
+    if (!sl.isRegistered<LyricsInteractionController>()) {
+      sl.registerLazySingleton(() => LyricsInteractionController(sl()));
+      unawaited(sl<LyricsInteractionController>().load());
+    }
+    return sl<LyricsInteractionController>();
+  }
+
   @override
   Widget build(BuildContext context) {
     final themeController = sl<ThemeController>();
     final localeController = sl<LocaleController>();
     final metadataController = sl<OnlineMetadataController>();
+    final lyricsInteractionController = _resolveLyricsInteractionController();
     final listenable = Listenable.merge(
-      [themeController, localeController, metadataController],
+      [
+        themeController,
+        localeController,
+        metadataController,
+        lyricsInteractionController,
+      ],
     );
 
     return AnimatedBuilder(
@@ -61,6 +76,7 @@ class SettingsView extends StatelessWidget {
           currentLocale: localeController.locale,
           onLocaleChanged: localeController.setLocale,
           metadataController: metadataController,
+          lyricsInteractionController: lyricsInteractionController,
         );
       },
     );
@@ -74,6 +90,7 @@ class _UnifiedSettingsView extends StatelessWidget {
     required this.currentLocale,
     required this.onLocaleChanged,
     required this.metadataController,
+    required this.lyricsInteractionController,
   });
 
   final ThemeMode currentMode;
@@ -81,6 +98,7 @@ class _UnifiedSettingsView extends StatelessWidget {
   final Locale? currentLocale;
   final Future<void> Function(Locale?) onLocaleChanged;
   final OnlineMetadataController metadataController;
+  final LyricsInteractionController lyricsInteractionController;
 
   @override
   Widget build(BuildContext context) {
@@ -167,6 +185,19 @@ class _UnifiedSettingsView extends StatelessWidget {
                             value: metadataController.autoFetchArtwork,
                             onChanged: (value) => unawaited(
                               metadataController.setAutoFetchArtwork(value),
+                            ),
+                            isDarkMode: isDarkMode,
+                          ),
+                          const SizedBox(height: 12),
+                          _SettingsSwitchTile(
+                            title: '手机歌词页允许进入详情页',
+                            subtitle: '关闭后仅在封面与歌词页之间切换（默认关闭）',
+                            value:
+                                lyricsInteractionController
+                                    .enableCompactDetailPage,
+                            onChanged: (value) => unawaited(
+                              lyricsInteractionController
+                                  .setEnableCompactDetailPage(value),
                             ),
                             isDarkMode: isDarkMode,
                           ),
@@ -318,6 +349,16 @@ class _UnifiedSettingsView extends StatelessWidget {
             value: metadataController.autoFetchArtwork,
             onChanged: (value) => unawaited(
               metadataController.setAutoFetchArtwork(value),
+            ),
+            isDarkMode: isDarkMode,
+          ),
+          const SizedBox(height: 12),
+          _SettingsSwitchTile(
+            title: '手机歌词页允许进入详情页',
+            subtitle: '关闭后仅在封面与歌词页之间切换（默认关闭）',
+            value: lyricsInteractionController.enableCompactDetailPage,
+            onChanged: (value) => unawaited(
+              lyricsInteractionController.setEnableCompactDetailPage(value),
             ),
             isDarkMode: isDarkMode,
           ),

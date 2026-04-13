@@ -10,6 +10,8 @@ class StorageKeys {
   static const locale = 'ui.locale';
   static const playbackHistory = 'history.entries';
   static const lyricsSettings = 'lyrics.settings';
+  static const enableCompactLyricsDetailPage =
+      'lyrics.compact.enableDetailPage';
   static const autoFetchLyrics = 'lyrics.autoFetchOnline';
   static const autoFetchArtwork = 'artwork.autoFetchOnline';
   static const libraryDirectories = 'library.directories';
