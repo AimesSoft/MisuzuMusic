@@ -2178,7 +2178,7 @@ class _CoverColumn extends StatelessWidget {
     return LayoutBuilder(
       builder: (context, constraints) {
         final double topPadding = showLyricPreview ? 48.0 : 0.0;
-        final double bottomPadding = math.max(0.0, bottomInset);
+        final double bottomPadding = 0.0;
 
         return SingleChildScrollView(
           physics: const BouncingScrollPhysics(),
