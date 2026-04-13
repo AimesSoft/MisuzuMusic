@@ -414,16 +414,43 @@ class _PlaybackQueueSheetState extends State<_PlaybackQueueSheet> {
   static const double _maxChildSize = 0.95;
   static const double _closeDragThreshold = 72;
   static const double _closeVelocityThreshold = 900;
+  static const double _minExtentEpsilon = 0.003;
 
   final DraggableScrollableController _sheetController =
       DraggableScrollableController();
   double _dragDistance = 0;
+  bool _closeArmed = false;
+
+  bool get _isAtMinExtent {
+    if (!_sheetController.isAttached) {
+      return false;
+    }
+    return _sheetController.size <= _minChildSize + _minExtentEpsilon;
+  }
+
+  Future<void> _snapToMinExtent() async {
+    if (!_sheetController.isAttached) {
+      return;
+    }
+    final current = _sheetController.size;
+    if ((current - _minChildSize).abs() <= _minExtentEpsilon) {
+      return;
+    }
+    await _sheetController.animateTo(
+      _minChildSize,
+      duration: const Duration(milliseconds: 180),
+      curve: Curves.easeOutCubic,
+    );
+  }
 
   void _handleDragStart(DragStartDetails details) {
     _dragDistance = 0;
   }
 
   void _handleDragUpdate(DragUpdateDetails details) {
+    if (details.delta.dy < 0 && _closeArmed) {
+      _closeArmed = false;
+    }
     _dragDistance =
         (_dragDistance + details.delta.dy).clamp(0.0, double.infinity).toDouble();
     if (!_sheetController.isAttached) {
@@ -439,13 +466,22 @@ class _PlaybackQueueSheetState extends State<_PlaybackQueueSheet> {
     _sheetController.jumpTo(nextSize);
   }
 
-  void _handleDragEnd(DragEndDetails details) {
+  Future<void> _handleDragEnd(DragEndDetails details) async {
     final velocity = details.primaryVelocity ?? 0;
-    final shouldClose = velocity > _closeVelocityThreshold ||
+    final closeIntent = velocity > _closeVelocityThreshold ||
         (_dragDistance > _closeDragThreshold && velocity >= 0);
-    if (shouldClose) {
-      Navigator.of(context).maybePop();
+
+    if (closeIntent) {
+      if (_closeArmed && _isAtMinExtent) {
+        Navigator.of(context).maybePop();
+      } else {
+        _closeArmed = true;
+        await _snapToMinExtent();
+      }
+    } else if (velocity < 0) {
+      _closeArmed = false;
     }
+
     _dragDistance = 0;
   }
 
